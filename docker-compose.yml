@@ -4,13 +4,23 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MONGO_URL=mongodb://db:27017
+      - MONGO_URL=${MONGO_URL:-mongodb://db:27017}
     depends_on:
       - db
   db:
     image: mongo:latest
     volumes:
       - mongo_data:/data/db
-
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: always
+    environment:
+      - NGROK_AUTHTOKEN=3CXcEJztSYVu0Xqk8UAPHeD8KgW_2Q2yW7ZCgdei1w38WrMks
+    command:
+      - "http"
+      - "--domain=apache-monoxide-area.ngrok-free.dev"
+      - "app:8000"
+    depends_on:
+      - app
 volumes:
   mongo_data:

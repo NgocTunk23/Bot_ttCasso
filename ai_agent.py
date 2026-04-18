@@ -1,47 +1,59 @@
 import google.generativeai as genai
 import asyncio
+import time
+import json
 from database import save_order
 
-# Lưu trữ phiên chat của từng khách hàng (Memory)
 chat_sessions = {}
 
 def get_ai_response(chat_id, user_text, menu_text):
-    genai.configure(api_key="AIzaSyAiYSBkHxPE2TR7aybN-4iMLXWGoBqPfTM") # Nhớ đổi key mới!
+    # 🔴 BƯỚC 1: ĐIỀN API KEY GEMINI MỚI TẠO Ở ĐÂY
+    genai.configure(api_key="AIzaSyDlSkxJHDy_4OlN1RvSby-EZEU-icI_RrU")
     
-    # Định nghĩa công cụ để AI gọi khi khách chốt đơn
     def create_order(items: str, total_price: int, customer_address: str, customer_phone: str) -> str:
-        """
-        Gọi hàm này CHỈ KHI khách hàng đã chốt đơn và cung cấp đủ: món uống (kèm size, đường, đá), tổng tiền, địa chỉ và SĐT.
-        """
+        # Tạo mã đơn bằng Timestamp
+        order_code = int(time.time())
+        
+        # 1. Lưu DB
         order_data = {
-            "houseid": "HS001", # Kế thừa cấu trúc IoT của bạn
+            "order_id": order_code,
             "chat_id": chat_id,
             "items": items,
-            "total_price": total_price,
+            "total": total_price,
             "address": customer_address,
             "phone": customer_phone,
             "status": "pending"
         }
         
-        # Kích hoạt lưu vào MongoDB
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(save_order(order_data))
         except RuntimeError:
             asyncio.run(save_order(order_data))
-            
-        return f"Đã ghi nhận đơn hàng {total_price}đ. Báo bếp làm món ngay!"
 
-    # Khởi tạo model nếu user này chưa chat bao giờ
+        # 🔴 BƯỚC 2: CẤU HÌNH NGÂN HÀNG THẬT CỦA BẠN (ĐỂ KHÁCH QUÉT QR)
+        # Tên viết tắt ngân hàng: MB, VCB, TCB, ACB, TPB...
+        bank_id = "MB"  
+        account_no = "123456789"  # Số tài khoản của bạn/mẹ bạn
+        
+        # Tạo link sinh ảnh VietQR
+        qr_url = f"https://img.vietqr.io/image/{bank_id}-{account_no}-compact.png?amount={total_price}&addInfo=DonHang{order_code}"
+
+        # Trả JSON về cho hàm xử lý của main.py
+        return json.dumps({
+            "is_payment": True,
+            "qr_url": qr_url,
+            "text": f"Dạ cô chủ lên đơn xong cho mình rồi ạ!\n\n📋 Món của mình: {items}\n💰 Tổng tiền: {total_price:,}đ.\n\nAnh/Chị quét mã QR dưới đây để thanh toán giúp em nhé!",
+            "order_id": order_code
+        })
+
     if chat_id not in chat_sessions:
         model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash', # CHỈ CẦN SỬA DÒNG NÀY
+            model_name='gemini-2.5-flash',
             tools=[create_order],
-            system_instruction=f"Bạn là cô chủ quán trà sữa. Dưới đây là Menu:\n{menu_text}\nNhiệm vụ: Chào hỏi, tư vấn món. Bắt buộc hỏi size, lượng đường, đá. Khi khách chốt, tính tổng tiền và xin địa chỉ, số điện thoại. Cuối cùng bắt buộc gọi hàm create_order để chốt."
+            system_instruction=f"Bạn là cô chủ quán trà sữa. Dưới đây là Menu:\n{menu_text}\nNhiệm vụ: Chào hỏi, lấy thông tin món, tính tổng tiền, xin SĐT và địa chỉ. KHI ĐÃ ĐỦ THÔNG TIN, BẮT BUỘC gọi hàm create_order."
         )
-        # Bật tự động gọi hàm
         chat_sessions[chat_id] = model.start_chat(enable_automatic_function_calling=True)
     
-    # Gửi tin nhắn mới vào phiên chat hiện tại
     response = chat_sessions[chat_id].send_message(user_text)
     return response.text
