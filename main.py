@@ -2,14 +2,18 @@ from fastapi import FastAPI, Request, BackgroundTasks
 import httpx
 import json
 import csv
+import re
 from ai_agent import get_ai_response
-from database import update_order_status
+from database import update_order_status, client, ping_db
 
 app = FastAPI()
+@app.on_event("startup")
+async def startup_db_client():
+    await ping_db()
 
-# 🔴 BƯỚC 3: ĐIỀN THÔNG TIN TELEGRAM
+# THÔNG TIN TELEGRAM
 TELEGRAM_TOKEN = "8079622074:AAEBJDogcM767t4kr4UGkjLYZAWghp1R0M0"
-KITCHEN_GROUP_ID = -5237546308  # Điền ID Group của Bếp (Ví dụ: -100xxx)
+KITCHEN_GROUP_ID = -1003636305886
 
 def load_menu():
     menu_str = "MENU QUÁN:\n"
@@ -27,11 +31,13 @@ MENU_TEXT = load_menu()
 
 async def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json={"chat_id": chat_id, "text": text})
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client: # Tăng lên 30s cho chắc
+            await client.post(url, json={"chat_id": chat_id, "text": text})
+    except httpx.ConnectTimeout:
+        print(f"❌ LỖI: Không thể kết nối tới Telegram (Timeout) khi gửi tới {chat_id}")
 
 async def send_photo_with_button(chat_id, photo_url, caption, order_id):
-    """Gửi ảnh QR kèm nút bấm xác nhận"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     payload = {
         "chat_id": chat_id,
@@ -43,50 +49,85 @@ async def send_photo_with_button(chat_id, photo_url, caption, order_id):
             ]]
         }
     }
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(url, json=payload)
+    except httpx.ConnectTimeout:
+        print(f"❌ LỖI: Timeout khi gửi ảnh QR tới {chat_id}")
 
+# --- XỬ LÝ TIN NHẮN TELEGRAM ---
 async def process_telegram_message(chat_id, user_text):
     ai_reply = get_ai_response(chat_id, user_text, MENU_TEXT)
-    
     try:
-        # Nếu AI trả về JSON (khi chốt đơn gọi QR)
         reply_data = json.loads(ai_reply)
         if reply_data.get("is_payment"):
             await send_photo_with_button(chat_id, reply_data["qr_url"], reply_data["text"], reply_data["order_id"])
-    except json.JSONDecodeError:
-        # Nếu AI trả về Text bình thường (Đang tư vấn)
+    except:
         await send_message(chat_id, ai_reply)
 
 @app.post("/webhook")
-async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
+async def handle_telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
-    
-    # --- LUỒNG 1: KHÁCH BẤM NÚT "ĐÃ CHUYỂN KHOẢN" ---
     if "callback_query" in data:
         cb = data["callback_query"]
         chat_id = cb["message"]["chat"]["id"]
         callback_data = cb["data"]
-        
         if callback_data.startswith("paid_"):
             order_id = int(callback_data.split("_")[1])
-            
-            # Trả lời khách
-            background_tasks.add_task(send_message, chat_id, "✅ Dạ cô chủ đã nhận được thông báo. Mẹ em đang làm món ngay cho mình rồi nha!")
-            
-            # Thông báo vào Group của Bếp (Mẹ)
-            thong_bao_bep = f"🚀 TING TING ĐƠN MỚI!\n\nMã đơn: #{order_id}\nTrạng thái: Khách đã báo chuyển khoản.\n\nMẹ check app ngân hàng và bắt đầu làm món nhé!"
-            background_tasks.add_task(send_message, KITCHEN_GROUP_ID, thong_bao_bep)
-            
-            # Lưu CSDL trạng thái Paid
+            background_tasks.add_task(send_message, chat_id, "✅ Dạ cô chủ đã nhận thông báo. Mẹ em đang làm món rồi nha!")
             background_tasks.add_task(update_order_status, order_id, "paid")
-            
         return {"status": "ok"}
-
-    # --- LUỒNG 2: KHÁCH NHẮN TIN BÌNH THƯỜNG ---
     if "message" in data and "text" in data["message"]:
-        chat_id = data["message"]["chat"]["id"]
-        user_text = data["message"]["text"]
-        background_tasks.add_task(process_telegram_message, chat_id, user_text)
-
+        background_tasks.add_task(process_telegram_message, data["message"]["chat"]["id"], data["message"]["text"])
     return {"status": "ok"}
+
+# --- XỬ LÝ WEBHOOK PAYOS (TIỀN VÀO TỰ ĐỘNG) ---
+@app.post("/payos-webhook")
+async def handle_payos_webhook(request: Request, background_tasks: BackgroundTasks):
+    try:
+        payload = await request.json()
+        print("\n" + "="*50)
+        print("🔔 CÓ TÍN HIỆU TỪ PAYOS TRUYỀN VỀ CỔNG /payos-webhook")
+        print("📦 Dữ liệu thô:", json.dumps(payload, ensure_ascii=False))
+        
+        # Kiểm tra code thành công của PayOS
+        if str(payload.get("code")) == "00" or payload.get("success") == True:
+            data = payload.get("data", {})
+            desc = data.get("description", "").upper()
+            amount = data.get("amount", 0)
+            
+            print(f"🔍 Đang tìm mã đơn trong nội dung chuyển khoản: '{desc}'")
+            
+            # Lớp 1: Tìm trong nội dung chuyển khoản (Description)
+            match = re.search(r'DONHANG(\d+)', desc)
+            order_id = None
+            
+            if match:
+                order_id = int(match.group(1))
+            elif data.get("orderCode"):
+                # Lớp 2: Nếu không thấy trong nội dung, lấy thẳng từ orderCode của PayOS
+                order_id = data.get("orderCode")
+            
+            # Trong file main.py, phần xử lý payos-webhook
+            if order_id:
+                order_id = int(order_id) # ÉP CHẶT KIỂU SỐ NGUYÊN ĐỂ KHỚP VỚI DATABASE
+                print(f"✅ TÌM THẤY MÃ ĐƠN: {order_id}. Đang báo Telegram...")
+                
+                # 1. Cập nhật DB
+                background_tasks.add_task(update_order_status, order_id, "paid")
+                
+                # 2. Báo cho Bếp
+                thong_bao = f"🚀 TING TING TIỀN VÀO!\n\nMã đơn: #{order_id}\nSố tiền: {amount:,}đ\nNội dung: {desc}\n\nMẹ làm món ngay nhé!"
+                background_tasks.add_task(send_message, KITCHEN_GROUP_ID, thong_bao)
+                print("✅ Đã đẩy lệnh gửi tin nhắn Telegram vào Background!")
+            else:
+                print("⚠️ LỖI: Không tìm thấy chữ 'DONHANG' kèm số trong nội dung chuyển khoản!")
+        else:
+            print(f"⚠️ LỖI: PayOS báo giao dịch thất bại hoặc định dạng lạ. Code: {payload.get('code')}")
+            
+        print("="*50 + "\n")
+        return {"error": 0, "message": "Ok", "success": True}
+        
+    except Exception as e:
+        print("❌ Lỗi sập Webhook PayOS:", e)
+        return {"error": 1, "message": str(e), "success": False}

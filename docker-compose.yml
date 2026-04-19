@@ -4,13 +4,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MONGO_URL=${MONGO_URL:-mongodb://db:27017}
-    depends_on:
-      - db
-  db:
-    image: mongo:latest
-    volumes:
-      - mongo_data:/data/db
+      - MONGO_URL=mongodb+srv://ngocton:sKy2514%400502@botcasso.e7u65vk.mongodb.net/?appName=botcasso
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
   ngrok:
     image: ngrok/ngrok:latest
     restart: always
@@ -18,9 +15,7 @@ services:
       - NGROK_AUTHTOKEN=3CXcEJztSYVu0Xqk8UAPHeD8KgW_2Q2yW7ZCgdei1w38WrMks
     command:
       - "http"
-      - "--domain=apache-monoxide-area.ngrok-free.dev"
+      - "--url=apache-monoxide-area.ngrok-free.dev"
       - "app:8000"
     depends_on:
       - app
-volumes:
-  mongo_data:

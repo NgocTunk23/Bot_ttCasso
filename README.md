@@ -1,1 +1,0 @@
-export MONGO_URL="mongodb+srv://ngocton:sKy2514@0502@botcasso.e7u65vk.mongodb.net/?appName=botcasso"
